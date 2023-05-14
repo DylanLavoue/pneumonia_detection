@@ -10,11 +10,11 @@ class, which can compute various evaluation metrics. The module uses `numpy`,
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow_addons.metrics import MatthewsCorrelationCoefficient
+from tensorflow_addons.metrics import CohenKappa
 from sklearn.metrics import confusion_matrix, \
                             ConfusionMatrixDisplay, \
                             precision_recall_fscore_support, \
-                            matthews_corrcoef
+                            cohen_kappa_score
 
 
 class FPRNormal(keras.metrics.Metric):
@@ -71,6 +71,14 @@ class FPRNormal(keras.metrics.Metric):
         """
         y_pred = tf.argmax(y_pred, axis=-1)
         y_true = tf.argmax(y_true, axis=-1)
+        
+        """
+        false_positives is computed using tf.reduce_sum() and tf.cast(). 
+        It counts the number of false positives by checking if the predicted label (y_pred) is the normal class (self.normal_idx)
+        and the true label is not equal to the predicted label.
+        Why?
+        
+        """
         false_positives = tf.reduce_sum(
             tf.cast(tf.logical_and(tf.equal(y_pred, self.normal_idx),
                                    tf.not_equal(y_true, y_pred)),
@@ -131,13 +139,14 @@ class Evaluation():
         self.full_metrics = {
             'Precision': keras.metrics.Precision,
             'Recall': keras.metrics.Recall,
-            'MCC': MatthewsCorrelationCoefficient,
+            'Kappa': CohenKappa,
             'FPR normal': FPRNormal,
         }
         self.loss_function = 'categorical_crossentropy'
 
     def __decode_one_hot(self, y_true, y_pred):
         """
+        https://www.tensorflow.org/api_docs/python/tf/one_hot
         Private method that decodes predictions and true labels from one-hot
         encoding.
 
@@ -159,6 +168,7 @@ class Evaluation():
 
     def compute_confusion_matrix(self, y_true, y_pred, display=False):
         """
+        https://www.tensorflow.org/api_docs/python/tf/math/confusion_matrix
         Computes the confusion matrix between true labels and predicted
         labels, and optionally displays it.
 
@@ -176,6 +186,7 @@ class Evaluation():
         """
         y_true, y_pred = self.__decode_one_hot(y_true, y_pred)
 
+       
         conf_mx = confusion_matrix(y_true, y_pred)
 
         if display:
@@ -189,12 +200,13 @@ class Evaluation():
 
     def get_training_metrics(self, metrics='BASE'):
         """
+        
         Returns a list of training metrics to monitor during training.
 
         Args:
             metrics (str or list, optional): The metrics to include. Can be
                 one of 'BASE', 'FULL', or a list of specific metrics. 'BASE'
-                includes only the Matthews correlation coefficient (MCC),
+                includes only the Kapa metric and the FPR for the normal class,
                 which is the default. 'FULL' includes all available metrics.
                 A list of specific metrics can be passed as a list of strings.
                 Defaults to 'BASE'.
@@ -205,13 +217,13 @@ class Evaluation():
         with self.strategy.scope():
             if metrics == 'BASE':
                 training_metrics = [
-                    self.full_metrics['MCC'](num_classes=3, name='MCC')
+                    self.full_metrics['Kappa'](num_classes=3, name='Kappa')
                 ]
 
             if metrics == 'FULL':
                 training_metrics = []
                 for name, metric in self.full_metrics.items():
-                    if name == 'MCC':
+                    if name == 'Kappa':
                         training_metrics.append(
                             metric(num_classes=3, name=name)
                         )
@@ -234,10 +246,10 @@ class Evaluation():
                     if name not in self.full_metrics.keys():
                         warn_message = f"Unexpected given metric : '{name}' "
                         warn_message += ", accepted metrics are "
-                        warn_message += "Precision, Recall, MCC, FPR Normal"
+                        warn_message += "Precision, Recall, kcs, FPR Normal"
                         raise KeyError(warn_message)
 
-                    if name == 'MCC':
+                    if name == 'Kappa':
                         training_metrics.append(
                             self.full_metrics[name](num_classes=3, name=name)
                         )
@@ -263,6 +275,8 @@ class Evaluation():
         """
         Computes and returns a dictionary of classification metrics for each
         class and global metrics.
+        
+        https://www.tensorflow.org/addons/api_docs/python/tfa/metrics/CohenKappa
 
         Args:
             y_true_oh (numpy.ndarray): A numpy array representing the true
@@ -279,6 +293,12 @@ class Evaluation():
         Returns:
             dict: A dictionary containing classification metrics for each
                 class and global metrics.
+                
+        https://scikit-learn.org/stable/modules/generated/sklearn.metrics.precision_recall_fscore_support.html
+        
+        Return Value:
+        The function returns a tuple (precision, recall, fscore, support) containing the calculated metrics 
+        for each class specified in labels (or for all unique labels if labels is not specified).
         """
         y_true, y_pred = self.__decode_one_hot(y_true_oh, y_pred_oh)
 
@@ -288,15 +308,15 @@ class Evaluation():
             average=None,
             sample_weight=sample_weight
         )
-        mcc = []
+        kcs = []
         for idx, label in enumerate(self.labels):
             y_true_cls = [1 if y == idx else 0 for y in y_true]
             y_pred_cls = [1 if y == idx else 0 for y in y_pred]
-            mcc.append(matthews_corrcoef(y_true_cls,
+            kcs.append(cohen_kappa_score(y_true_cls,
                                          y_pred_cls,
                                          sample_weight=sample_weight)
                        )
-        mcc = np.array(mcc)
+        kcs = np.array(kcs)
 
         headers_cls = [
             metric for metric in self.full_metrics.keys()
@@ -304,7 +324,7 @@ class Evaluation():
         ]
         headers_cls.append('Support')
 
-        rows = list(zip(self.labels, p, r, mcc, s))
+        rows = list(zip(self.labels, p, r, kcs, s))
         metrics_cls_dict = {label[0]: label[1:] for label in rows}
         for label, scores in metrics_cls_dict.items():
             metrics_cls_dict[label] = dict(zip(headers_cls,
@@ -316,7 +336,7 @@ class Evaluation():
             average='weighted',
             sample_weight=sample_weight,
         )
-        avg_mcc = matthews_corrcoef(y_true,
+        avg_kappa = cohen_kappa_score(y_true,
                                     y_pred,
                                     sample_weight=sample_weight
                                     )
@@ -327,7 +347,7 @@ class Evaluation():
                                        )
         fpr_normal = fpr_normal_metric.result().numpy()
 
-        avg = [avg_p, avg_r, avg_mcc, fpr_normal]
+        avg = [avg_p, avg_r, avg_kappa, fpr_normal]
         metrics_avg_dict = {
             head: value for head, value in zip(self.full_metrics.keys(), avg)
             }
